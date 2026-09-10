@@ -1,10 +1,8 @@
-#!/usr/bin/perl -CS
+#!/usr/bin/perl -CSD
 use warnings;
 use strict;
 use autodie;
-use HTML::Entities;
-use MediaWiki::DumpFile;
-use Text::MediawikiFormat;
+use utf8;
 
 # Minimum number of occurrences of a word.
 my $MIN_FREQ = 10;
@@ -12,10 +10,10 @@ my $MIN_FREQ = 10;
 # Regex for letter (can be overridden to restrict to appropriate alphabet).
 my $LETTER_RE = "['\\p{Word}]";
 
-my $file;
+my @files;
 if (@ARGV && $ARGV[0] !~ /^-/) {
-    if (@ARGV) {
-	$file = shift @ARGV;
+    while (@ARGV > 0 && $ARGV[0] =~ /\.txt/) {
+	push @files, shift @ARGV;
     }
 
     if (@ARGV) {
@@ -40,14 +38,15 @@ if (@ARGV && $ARGV[0] !~ /^-/) {
     }
 }
 
-if (!defined $file || @ARGV) {
+if (@files == 0 || @ARGV) {
     my $basedir = $0;
     $basedir =~ s![^/]*$!!;
     print <<"__END__";
-Usage: $0 MEDIAWIKI_DUMP_FILE [MIN_FREQ [SCRIPT]]
+Usage: $0 EBOOK_TXT... [MIN_FREQ [SCRIPT]]
 
-MEDIAWIKI_DUMP_FILE is a mediawiki XML dump file, which can be uncompressed
-or compressed with bzip2, gzip, xz or zstd.
+EBOOK_TXT... is one or more e-books in the plain-text format used by
+Project Gutenberg, which can be uncompressed or compressed with bzip2,
+gzip, xz or zstd.  The filenames must contain the substring `.txt`.
 
 MIN_FREQ is the minimum number of occurrences needed for a word to be
 included.  The default is 10.
@@ -71,15 +70,14 @@ are not changed by the Perl "lc" function.
 
 For example:
 
-Download a dump for language with ISO 639-1 language code XX (mirrors are
-available, see https://dumps.wikimedia.org/mirrors.html):
+Download one or more ebooks:
 
-wget https://dumps.wikimedia.org/XXwiki/latest/XXwiki-latest-pages-articles.xml.bz2
-$0 XXwiki-latest-pages-articles.xml.bz2 42 ascii > voc.freq
+wget https://www.gutenberg.org/ebooks/100.txt.utf-8
+$0 *.txt.utf-8 10 latin > voc.freq
 
 This will output a line for each word, preceded by its frequency separated
 by a tab.  The words are in descending frequency order.  Only words occurring
-at least 42 times are included, and only ASCII letters are treated as word
+at least 10 times are included, and only Latin letters are treated as word
 characters.
 
 You should specify an appropriate alphabet for the language.  The MIN_FREQ
@@ -100,90 +98,85 @@ __END__
     exit (@ARGV && $ARGV[0] eq '--help' ? 0 : 1);
 }
 
-my $reader_pid = 0;
-my $dump;
-if ($file =~ /\.xml$/) {
-    $reader_pid = $$;
-    open $dump, '<', $file;
-} elsif ($file =~ /\.xml\.bz2$/) {
-    $reader_pid = open $dump, '-|';
-    if ($reader_pid == 0) {
-	exec 'bzip2', '-dc', $file;
-    }
-} elsif ($file =~ /\.xml\.gz$/) {
-    $reader_pid = open $dump, '-|';
-    if ($reader_pid == 0) {
-	exec 'gzip', '-dc', $file;
-    }
-} elsif ($file =~ /\.xml\.xz$/) {
-    $reader_pid = open $dump, '-|';
-    if ($reader_pid == 0) {
-	exec 'xz', '-dc', $file;
-    }
-} elsif ($file =~ /\.xml\.zstd$/) {
-    $reader_pid = open $dump, '-|';
-    if ($reader_pid == 0) {
-	exec 'zstd', '-dc', $file;
-    }
-} else {
-    die "No handling for file type of '$file'\n";
-}
-
-my $fdinfo = "/proc/$reader_pid/fdinfo/3";
-my $input_size = -s $file;
-
 my %f;
 
-my $mw = MediaWiki::DumpFile->new;
-my $pages = $mw->fastpages($dump);
-my ($title, $body);
 my $c = 0;
 my $t = time;
-while (($title, $body) = $pages->next) {
-    # Skip special pages.
-    # FIXME: Maybe Category:* are worth processing?
-    next if index($title, ':') >= 0;
-
-    my $raw = $body;
-    if (++$c % 100000 == 0) {
-	my $e = time - $t;
-	printf STDERR "%d in %ds %d/hour : %s\n", $c, $e, int($c*3600/$e), $title;
+for my $file (@files) {
+    my $reader_pid = 0;
+    my $dump;
+    if ($file =~ /\.txt(?:\.utf-8)?$/) {
+	$reader_pid = $$;
+	open $dump, '<', $file;
+    } elsif ($file =~ /\.txt(?:.utf-8)?\.bz2$/) {
+	$reader_pid = open $dump, '-|';
+	if ($reader_pid == 0) {
+	    exec 'bzip2', '-dc', $file;
+	}
+    } elsif ($file =~ /\.txt(?:.utf-8)?\.gz$/) {
+	$reader_pid = open $dump, '-|';
+	if ($reader_pid == 0) {
+	    exec 'gzip', '-dc', $file;
+	}
+    } elsif ($file =~ /\.txt(?:.utf-8)?\.xz$/) {
+	$reader_pid = open $dump, '-|';
+	if ($reader_pid == 0) {
+	    exec 'xz', '-dc', $file;
+	}
+    } elsif ($file =~ /\.txt(?:.utf-8)?\.zstd?$/) {
+	$reader_pid = open $dump, '-|';
+	if ($reader_pid == 0) {
+	    exec 'zstd', '-dc', $file;
+	}
+    } else {
+	die "No handling for file type of '$file'\n";
     }
-    if (defined $fdinfo && $c % 100 == 0) {
-	no autodie qw(open);
-	if (open my $f, '<', $fdinfo) {
-	    local $_ = <$f>;
-	    close $f;
-	    if (/^pos:\s*(\d+)/) {
-		use integer;
-		my $progress = 640 * $1 / $input_size;
-		my $full = $progress / 8;
-		my $part = $progress % 8;
-		print STDERR "\x{2588}" x $full;
-		print STDERR chr(0x2590 - $part) if $part;
-		print STDERR "\xb7" x (80 - $full - ($part > 0));
-		print STDERR "\r";
+    binmode($dump, ':encoding(UTF-8)');
+
+    my $fdinfo = "/proc/$reader_pid/fdinfo/3";
+    my $input_size = -s $file;
+
+    my ($title);
+    while (<$dump>) {
+	last if /^\*\*\* START .*\*\*\*\s*$/;
+	$title = $1 if /^Title:\s*(.*?)\s*$/;
+    }
+    while (<$dump>) {
+	last if /^\*\*\* END .*\*\*\*\s*$/;
+	tr/‘’/''/;
+
+	if (++$c % 100000 == 0) {
+	    my $e = time - $t;
+	    printf STDERR "%d in %ds %d/hour : %s\n", $c, $e, int($c*3600/$e), $title unless $e == 0;
+	}
+	if (defined $fdinfo && $c % 1000 == 0) {
+	    no autodie qw(open);
+	    if (open my $f, '<', $fdinfo) {
+		local $_ = <$f>;
+		close $f;
+		if (/^pos:\s*(\d+)/) {
+		    use integer;
+		    my $progress = 640 * $1 / $input_size;
+		    my $full = $progress / 8;
+		    my $part = $progress % 8;
+		    print STDERR "\x{2588}" x $full;
+		    print STDERR chr(0x2590 - $part) if $part;
+		    print STDERR "\xb7" x (80 - $full - ($part > 0));
+		    print STDERR "\r";
+		}
 	    }
 	}
+	while (/\b$LETTER_RE+\b/go) {
+	    # Perl lc is Unicode-aware for strings with the UTF8 flag set (which it
+	    # will be here).
+	    my $word = $&;
+	    $word =~ s/_$//;
+	    $word =~ s/^_//;
+	    next if $word =~ /^[0-9]*$/;
+	    ++$f{lc($word)};
+	}
     }
-    local $_ = $body;
-    s!\{ (?: [^{}]++ | (?R) )* \}! !sxg;
-    s,<(?:\w+[^>]*/|!--.*?--)>,,sg;
-    s!<(\w+)[^>]*>.*?</\1 *>!!sg;
-    s!<.*?>!!sg;
-    s!\[\[(?:.*?\|)?([^|]*?)\]\]!index($1, ':') == -1 ? $1 : ' '!sge;
-    s!\[(?:.*? )?(.*?)\]!$1!sg;
-    # Strip out obvious cases of broken table formatting.
-    s/\ (?:bgcolor|align|colspan|width)=.*?|//g;
-    s/\|- (?:bgcolor|align|colspan|width)=.*//g;
-    decode_entities($_);
-    next if /^#REDIRECT\b/i;
-    next if /^__[A-Za-z]+__\s*$/;
-    while (/\b$LETTER_RE+\b/go) {
-	# Perl lc is Unicode-aware for strings with the UTF8 flag set (which it
-	# will be here).
-	++$f{lc($&)};
-    }
+    close $dump;
 }
 
 my @f;
